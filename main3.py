@@ -1,8 +1,8 @@
 from playwright.sync_api import sync_playwright
 import time, random, json, logging, statistics
 from datetime import datetime, date
-from package import *  # Conserve les fonctions métiers
-import numpy as np  # Correction pour l'erreur 'np'
+from package import *  
+import numpy as np  
 
 # Configuration du logging
 logging.basicConfig(
