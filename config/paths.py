@@ -8,7 +8,8 @@ class Paths:
     REPORT_DIR = BASE_DIR / 'reports'
     
     # Fichiers de données
-    DATABASE = DATA_DIR / 'dataset.db'
+    #DATABASE = DATA_DIR / 'dataset.db'
+    DATABASE = BASE_DIR / 'dataset.db'
     
     # Modèles
     LSTM_MODEL = MODEL_DIR / 'lstm_model.keras'

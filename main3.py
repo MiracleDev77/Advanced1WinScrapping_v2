@@ -2,7 +2,8 @@ from playwright.sync_api import sync_playwright
 import time, random, json, logging, statistics
 from datetime import datetime, date
 from package import *  
-import numpy as np  
+import numpy as np 
+
 
 # Configuration du logging
 logging.basicConfig(
@@ -56,7 +57,8 @@ def run_scraper():
                 "--no-sandbox",
                 "--disable-images",
                 "--disable-fonts",
-                "--mute-audio",  # Correction désactivation son
+                "--mute-audio",
+                "--disable-audio"
             ]
         )
         
@@ -174,7 +176,7 @@ def run_scraper():
                         print(f"10 derniers scores: {TenLastScore}\n")
                     
                     # Attente optimisée
-                    wait_time = random.uniform(3, 5)
+                    wait_time = random.uniform(1, 3)
                     print(f"Attente de {wait_time:.2f}s avant vérification...")
                     time.sleep(wait_time)
                     
@@ -192,12 +194,17 @@ def run_scraper():
         finally:
             browser.close()
 
-# Point d'entrée avec redémarrage automatique
+
+# Point d'entrée avec gestion des redémarrages
 if __name__ == "__main__":
+    logging.info('Initialisation du scraper...')
     while True:
         try:
-            print('Démarrage du scraper...')
+            print('='*50)
+            print(' SanF|an Casino Scrapper Pro'.center(50,'★'))
+            print('='*50)
             run_scraper()
+
         except Exception as e:
-            logging.error(f"Crash du script: {str(e)}. Redémarrage dans 60s.")
+            logging.error(f"Crash du script: {str(e)}. Redémarrage dans 60s.", exc_info=True)
             time.sleep(60)

@@ -45,7 +45,7 @@ def get_history_data(frame):
 
 def run_scraper():
     with sync_playwright() as p:
-        # Optimisation des ressources
+        # Optimisation des ressources 
         browser = p.firefox.launch(
             headless=True,
             args=[

@@ -1,14 +1,9 @@
 import sqlite3
+import numpy as np 
 
 Connexion = sqlite3.connect('dataset.db')
 Cursor = Connexion.cursor()
 
-
-# def addLastScore(Data):
-# 	Req = 'INSERT INTO dataset(Date,Heure,Score,Type,MoyenneMobileDixDernier,Ecart_Type) VALUES(?,?,?,?,?,?)'
-# 	Cursor.execute(Req,Data)
-# 	Connexion.commit()
-# 	return 0
 
 
 def addLastScore(Data):
@@ -44,7 +39,7 @@ def addLastScore(Data):
     # Type encodé temporaire (sera recalculé lors du préprocessing)
     type_encoded = 0 if type_ == 'Gagnant' else 1 if type_ == 'Perdant' else 2
     
-    new_data = Data + (
+    new_data = Data + [
         datetime_str,
         type_encoded,
         hour_sin,
@@ -55,7 +50,7 @@ def addLastScore(Data):
         score - prev_score,
         moyenne - prev_moyenne,
         1 if type_ == prev_type else 0
-    )
+    ]
     
     Cursor.execute(Req, new_data)
     Connexion.commit()
