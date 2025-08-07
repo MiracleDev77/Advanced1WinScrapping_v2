@@ -1,145 +1,212 @@
 from playwright.sync_api import sync_playwright
-import time,random,json,logging,statistics
-from datetime import datetime,date
-from package import *
-
+import time, random, json, logging, statistics, os
+from datetime import datetime, date
+from package import init_database, addLastScore, getLastScore, getTenLastScoreInArray
+import numpy as np 
 
 # Configuration du logging
-logging.basicConfig(filename="scraping.log", level=logging.INFO, format="%(asctime)s - %(message)s")
+logging.basicConfig(
+    filename="scraping.log", 
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 def save_data(datas, filename="data.json"):
+    """Sauvegarde des données brutes"""
     with open(filename, "a") as f:
         f.write(json.dumps(datas) + "\n")
 
-def run_script():
-    with sync_playwright() as p:
-        # Lancer Firefox en mode headless avec des optimisations
-        browser = p.firefox.launch(headless=True, args=[
-            "--disable-images",  # Désactiver les images
-            "--disable-fonts",   # Désactiver les polices
-            "--disable-audio",  # Désactiver la lecture audio
-        ])
-        context = browser.new_context(
-            viewport={"width": 800, "height": 600},  # Réduire la taille du viewport
-            ignore_https_errors=True,
+def get_history_data(frame):
+    """Récupère robustement les scores historiques de manière optimisée"""
+    try:
+        # Attendre que l'historique soit chargé avec timeout réduit
+        frame.wait_for_selector('[data-testid^="history-item-"]', timeout=5000)
+        
+        # Récupération directe des éléments sans boucle coûteuse
+        history_items = frame.query_selector_all(
+            '[data-testid^="history-item-"]:not([data-testid="history-item-undefined"])'
         )
+        
+        scores = []
+        for i in range(min(15, len(history_items))):  # Seulement les 15 premiers éléments
+            text = history_items[i].inner_text().strip()
+            if text.endswith('x'):
+                try:
+                    value = text[:-1].replace(',', '.').strip()
+                    score = float(value)
+                    scores.append(score)
+                except ValueError:
+                    continue
+        return scores
+    
+    except Exception as e:
+        logging.warning(f"Erreur historique: {str(e)}")
+        return []
+
+def run_scraper():
+    with sync_playwright() as p:
+        # Optimisation des ressources avec cache
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-setuid-sandbox",
+                "--no-sandbox",
+                "--disable-images",
+                "--disable-fonts",
+                "--mute-audio",
+                "--disable-audio",
+                "--disk-cache-size=1"
+            ]
+        )
+        
+        context = browser.new_context(
+            viewport={"width": 800, "height": 600},
+            ignore_https_errors=True,
+            java_script_enabled=True,
+            # Activation du cache pour accélérer les chargements
+            storage_state="state.json" if os.path.exists("state.json") else None
+        )
+        
         page = context.new_page()
-        iframe_selectors = [
-            'iframe[src*="lucky/onewin/"]',  # Le plus spécifique
-            'iframe[src*="luckyjet"]',
-            'iframe[src*="lucky"]',
-            'iframe.CasinoGameFrame_root_V6yFR',
-            'iframe.CasinoGame_game_JenRc',
-            'div.CasinoOneWinGame_game_goAwv iframe'  # Ancien sélecteur
-        ]
         
         try:
-            # Charger la page
-            page.goto("https://1win.com.ci/casino/play/1play_1play_luckyjet")
+            # Initialiser la base de données
+            init_database()
             
-            print('Detection du frame...')
-            # Attendre que l'iframe soit chargé
-            #iframe = page.wait_for_selector('div.CasinoOneWinGame_game_goAwv iframe', timeout=60000) #1mn
-            #iframe = page.wait_for_selector('iframe.CasinoGameFrame_root_V6yFR, iframe.CasinoGame_game_JenRc', timeout=60000) #1mn
-            iframe = page.wait_for_selector(','.join(iframe_selectors), timeout=60000)
+            # Navigation avec stratégie "eager" pour charger plus vite
+            page.goto(
+                "https://1win.com.ci/casino/play/v_1winGames:LuckyJet", 
+                timeout=30000,
+                wait_until="domcontentloaded"
+            )
+            logging.info("Page principale chargée")
 
+            # Sauvegarde de l'état de session pour les prochaines exécutions
+            context.storage_state(path="state.json")
+
+            # Sélecteur d'iframe robuste
+            iframe_selectors = [
+                'iframe.CasinoGameFrame_root_V6yFR',
+                'iframe[src*="luckyjet"]',
+                'div.CasinoOneWinGame_game_goAwv iframe'
+            ]
+            
+            iframe = page.wait_for_selector(','.join(iframe_selectors), timeout=15000)
             frame = iframe.content_frame()
-            
-            # Désactiver les animations, les vidéos et la lecture audio
+            logging.info("Iframe localisée")
+
+            # Désactivation des éléments non essentiels
             page.evaluate("""
-                document.body.style.animation = 'none';
-                document.body.style.transition = 'none';
-                for (const video of document.querySelectorAll('video')) {
-                    video.pause();
-                    video.remove();
-                }
-                for (const audio of document.querySelectorAll('audio')) {
-                    audio.pause();
-                    audio.remove();
-                }
+                const elements = document.querySelectorAll('video, audio, img');
+                elements.forEach(e => e.remove());
             """)
+
+            # Variables d'état pour optimisation
+            last_valid_scores = []
+            last_processed_score = 0
+            ten_last_cache = []
             
-            # Boucle principale pour récupérer les données
-            print("Recherche des données historiques...")
+            # Boucle principale optimisée
             start_time = time.time()
             while True:
-                print('Checking...')
-                datas = []
-                for i in range(10): #0-9 pour plus de rapidité  # Les IDs vont de 0 à 29
+                try:
+                    # Vérification rapide de l'iframe
+                    if frame.is_detached():
+                        logging.warning("Iframe détachée, rechargement rapide")
+                        page.reload(timeout=20000, wait_until="domcontentloaded")
+                        iframe = page.wait_for_selector(','.join(iframe_selectors), timeout=10000)
+                        frame = iframe.content_frame()
+                    
+                    # Récupération historique avec timeout réduit
                     try:
-                        item = frame.wait_for_selector(f'#history-item-{i}', timeout=5000) #5 secondes (Vu que le navigateur est lancé)
-                        value = item.inner_text()
-                        datas.append(float(value[:-1].strip()))  # Supprimer le "x"
-                    except Exception as e:
-                        logging.warning(f"Élément history-item-{i} non trouvé : {e}")
+                        historical_data = get_history_data(frame)
+                    except:
+                        historical_data = last_valid_scores  # Utiliser le dernier état connu
+                    
+                    if not historical_data:
+                        time.sleep(2)
                         continue
-
-                # logging.info(f"Données récupérées : {datas}")
-                save_data(datas)
-                print(f"Nouvelles données: {datas}")
-                ScoreDate = date.today()
-                ScoreHeure = datetime.now().time()
-
-                NewScore = float(datas[0]) if float(datas[0]) > 0 else float(datas[1])
-
-                TenLastScore = getTenLastScoreInArray()
-
-                # Si la liste est vide, utilisez une liste par défaut (par exemple [1.0])
-                if not TenLastScore:
-                    TenLastScore = [1.0]  # Valeur par défaut pour éviter l'erreur
-                    logging.warning("La base de données est vide, utilisation d'une valeur par défaut")
-
-                MoyenneMobile = statistics.mean(TenLastScore)
-                EcartType = statistics.stdev(TenLastScore) if len(TenLastScore) > 1 else 0
-
-                if NewScore <2:
-                    ScoreType = 'Faible';
-                elif  2 <= NewScore < 4.59:
-                    ScoreType = 'Moyenne';
-                elif 5 <= NewScore < 9.9:
-                    ScoreType = 'Bonne';
-                elif 10 <=NewScore< 49.9 :
-                    ScoreType = 'Bonne-49';
-                elif 50 <= NewScore< 99.9 :
-                    ScoreType = 'Bonne-99';
-                elif NewScore > 100:
-                    ScoreType = 'Jackpot';
-
-
-                last_score = getLastScore()
-
-                if NewScore != last_score:#Si le nouveau score n'est pas le dernier score enregistré | cela arrive quand l'avion continu de s'envoler
-                    if addLastScore([str(ScoreDate),str(ScoreHeure),NewScore,ScoreType,MoyenneMobile,EcartType]) == 0:
-                        print(f"\nNew Score: {NewScore}\nHeure: {ScoreHeure}\n")
-                    else:
-                        print("erreur signalé")
-
-                elif NewScore == getLastScore():
-                    print(f"\nL'avion est toujours dans les aires\nDernier Score:{getLastScore()}\n")
-                    print(f"Les 10 derniers scores: {TenLastScore}\n\n")
-                
-                # Attendre un temps aléatoire entre 1 et 6 secondes
-                randomTime = 5#random.randint(3, 5)
-                print(f"Attente de {randomTime} seconde pour checker...") 
-                time.sleep(randomTime)
-                
-                # Redémarrer le navigateur toutes les 24 heures
-                if time.time() - start_time > 86400:  # 24 heures en secondes
-                    browser.close()
-                    browser = p.firefox.launch(headless=True)
-                    start_time = time.time()
+                    
+                    # Filtrer les scores valides (positifs)
+                    valid_scores = [s for s in historical_data if s > 0]
+                    
+                    if not valid_scores:
+                        time.sleep(2)
+                        continue
+                    
+                    # Sauvegarde des données brutes uniquement si changement
+                    if valid_scores != last_valid_scores:
+                        #save_data(valid_scores[:5])  # Seulement 5 premiers pour réduire I/O
+                        print(f"Scores valides: {valid_scores[:5]}")
+                        last_valid_scores = valid_scores
+                    
+                    # Détermination du nouveau score
+                    NewScore = valid_scores[0]
+                    
+                    # Utilisation du cache pour éviter des requêtes SQL constantes
+                    if not ten_last_cache:
+                        ten_last_cache = getTenLastScoreInArray() or [1.0]
+                    
+                    # Vérification et enregistrement
+                    if NewScore != last_processed_score:
+                        # Mise à jour du cache
+                        ten_last_cache.insert(0, NewScore)
+                        ten_last_cache = ten_last_cache[:10]  # Garder seulement 10 éléments
+                        
+                        # Calculs statistiques
+                        MoyenneMobile = statistics.mean(ten_last_cache)
+                        EcartType = statistics.stdev(ten_last_cache) if len(ten_last_cache) > 1 else 0
+                        
+                        # Enregistrement
+                        if addLastScore([
+                            str(date.today()),
+                            datetime.now().strftime("%H:%M:%S"),
+                            NewScore,
+                            MoyenneMobile,
+                            EcartType
+                        ]) == 0:
+                            print(f"\n✅ Nouveau score: {NewScore}x")
+                            print(f"   Période: {'Favorable' if MoyenneMobile >= 3 else 'Défavorable'}")
+                            last_processed_score = NewScore
+                        else:
+                            print("❌ Erreur d'enregistrement")
+                    
+                    # Attente optimisée avec backoff dynamique
+                    wait_time = 0.5 + random.random()  # Entre 0.5 et 1.5 secondes
+                    time.sleep(wait_time)
+                    
+                    # Rafraîchissement périodique
+                    if time.time() - start_time > 1800:  # 30 minutes
+                        logging.info("Rafraîchissement périodique de la page")
+                        page.reload(timeout=20000, wait_until="domcontentloaded")
+                        iframe = page.wait_for_selector(','.join(iframe_selectors), timeout=10000)
+                        frame = iframe.content_frame()
+                        start_time = time.time()
+                        
+                except Exception as e:
+                    logging.warning(f"Erreur mineure: {str(e)}")
+                    time.sleep(3)
         
         except Exception as e:
-            logging.error(f"Une erreur critique s'est produite : {e}")
-            print(f"Une erreur critique s'est produite : {e}")
+            logging.critical(f"Erreur critique: {str(e)}", exc_info=True)
         finally:
-            browser.close()
+            try:
+                browser.close()
+            except:
+                pass
 
-# Redémarrer le script en cas d'erreur critique
-while True:
-    try:
-        print('Starting...')
-        run_script()
-    except Exception as e:
-        logging.error(f"Redémarrage du script après une erreur : {e}")
-        time.sleep(60)  # Attendre 1 minute avant de redémarrer
+
+# Point d'entrée optimisé
+if __name__ == "__main__":
+    logging.info('Démarrage du scraper optimisé')
+    while True:
+        try:
+            print('='*50)
+            print(' SanF|an Casino Scrapper Pro'.center(50,'★'))
+            print('='*50)
+            run_scraper()
+        except Exception as e:
+            logging.error(f"Crash: {str(e)}. Redémarrage dans 10s.", exc_info=True)
+            time.sleep(10)

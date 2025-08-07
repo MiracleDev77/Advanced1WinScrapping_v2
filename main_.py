@@ -1,3 +1,4 @@
+# main.py
 import argparse
 from pathlib import Path
 import pandas as pd
@@ -28,70 +29,71 @@ def main():
     db = CasinoDatabase()
     raw_data = db.fetch_data()
 
-    if 'ScoreType' in raw_data.columns:
-        raw_data.rename(columns={'ScoreType': 'Type'}, inplace=True)
-    elif 'Type' not in raw_data.columns:
-        # Handle cases where the column might be missing entirely
-        raise KeyError("Expected 'ScoreType' or 'Type' column in the database data, but neither was found.")
-
-    
     if args.train:
-        # Validation croisée
         for fold in range(TrainingParams.NUM_FOLDS):
             print(f"⏳ Training fold {fold+1}/{TrainingParams.NUM_FOLDS}")
             trainer = CasinoTrainer(fold=fold)
             trainer.train(raw_data)
 
     if args.evaluate:
-        # Charger le meilleur fold (ou spécifié)
         fold = args.fold if args.fold < TrainingParams.NUM_FOLDS else 0
         
         preprocessor = joblib.load(Paths.PREPROCESSOR.with_stem(f"{Paths.PREPROCESSOR.stem}_fold_{fold}"))
         _, _, test_raw = preprocessor.split_data(raw_data)
         test = preprocessor.transform(test_raw)
 
-        # Chargement LSTM avec n_classes
-        n_classes = len(preprocessor.encoder.classes_)
+        X_test, y_test, test_scores = preprocessor.prepare_sequences(test)
+        y_test_class, y_test_period = y_test
+
         lstm = LSTMModel(
-            input_shape=(preprocessor.window_size, len(preprocessor.feature_columns)),
-            n_classes=n_classes
+            input_shape=(preprocessor.window_size, len(preprocessor.feature_columns))
         ).load()
 
-        # Chargement des modèles XGBoost
         xgb_clf = XGBoostModel.load(
             Paths.XGB_MODEL.with_stem(f"{Paths.XGB_MODEL.stem}_fold_{fold}"), 
-            n_classes
+            n_classes=3
+        )
+        xgb_period = XGBoostModel.load(
+            Paths.XGB_PERIOD.with_stem(f"{Paths.XGB_PERIOD.stem}_fold_{fold}"), 
+            n_classes=1,
+            objective='binary:logistic'
         )
         xgb_reg = XGBRegressorModel.load(
             Paths.XGB_REGRESSOR.with_stem(f"{Paths.XGB_REGRESSOR.stem}_fold_{fold}")
         )
 
-        # Préparation des données de test
-        X_test, y_test, test_scores = preprocessor.prepare_sequences(test)
-
-        # Extraction des features hybrides
         trainer = CasinoTrainer(fold=fold)
         X_test_features = trainer._extract_hybrid_features(lstm.model, X_test, test)
 
-        # Évaluation
-        evaluator = CasinoEvaluator(preprocessor.encoder)
-        evaluator.fold = fold  # Pour le rapport
+        evaluator = CasinoEvaluator()
+        evaluator.fold = fold
         
-        y_pred = xgb_clf.model.predict(X_test_features)
-        y_proba = xgb_clf.model.predict_proba(X_test_features)
+        # Prédictions
+        y_pred_class = xgb_clf.model.predict(X_test_features)
+        y_proba_class = xgb_clf.model.predict_proba(X_test_features)
+        y_pred_period = xgb_period.model.predict(X_test_features)
         score_pred = xgb_reg.model.predict(X_test_features)
 
         report = evaluator.evaluate(
-            y_test, test_scores,
-            y_pred, score_pred,
-            y_proba
+            y_test_class, y_test_period, test_scores,
+            y_pred_class, y_pred_period, score_pred,
+            y_proba_class
         )
         
         print(f"\n📊 FOLD {fold} RESULTS:")
-        print(f"✅ ROC AUC: {report['roc_auc']:.3f}")
-        print(f"✅ F1 Score: {report['f1_score']:.3f}")
-        print(f"✅ Score MAE: {report['score_mae']:.2f}")
-        print(f"✅ Accuracy: {report['accuracy']:.2f}")
+        print("✅ Score Classification:")
+        print(f"   Accuracy: {report['score_class']['accuracy']:.3f}")
+        print(f"   F1 Score: {report['score_class']['f1_score']:.3f}")
+        print(f"   ROC AUC: {report['score_class']['roc_auc']:.3f}")
+        
+        print("\n✅ Period Prediction:")
+        print(f"   Accuracy: {report['period']['accuracy']:.3f}")
+        print(f"   F1 Score: {report['period']['f1_score']:.3f}")
+        print(f"   ROC AUC: {report['period']['roc_auc']:.3f}")
+        
+        print("\n✅ Score Regression:")
+        print(f"   MAE: {report['score_reg']['mae']:.2f}")
+        print(f"   RMSE: {report['score_reg']['rmse']:.2f}")
 
 if __name__ == '__main__':
     main()

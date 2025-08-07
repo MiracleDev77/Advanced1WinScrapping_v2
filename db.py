@@ -11,19 +11,24 @@ class DatabaseManager:
         """Initialise la base de données et la connexion"""
         self.conn = sqlite3.connect(self.db_path)
         self.cursor = self.conn.cursor()
-        
-        # Création de la table si elle n'existe pas
-        self.cursor.execute('''
+        #
+        self._create_table()
+
+
+
+    def _create_table(self):
+        cursor = self.conn.cursor()
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS dataset (
             Id INTEGER PRIMARY KEY AUTOINCREMENT,
             Date TEXT NOT NULL,
             Heure TEXT NOT NULL,
             Score REAL NOT NULL,
-            Type TEXT DEFAULT 'NO',
+            ScoreClass INTEGER,
+            Period INTEGER,
             MoyenneMobileDixDernier REAL DEFAULT 0,
             Ecart_Type REAL DEFAULT 0,
             Datetime TEXT,
-            Type_encoded INTEGER,
             hour_sin REAL,
             hour_cos REAL,
             prev_score REAL,
@@ -33,7 +38,7 @@ class DatabaseManager:
             moyenne_diff REAL,
             type_repetition INTEGER
         );
-        ''')
+        """)
         self.conn.commit()
     
     def add_last_score(self, data):
