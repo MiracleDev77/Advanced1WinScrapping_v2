@@ -8,13 +8,12 @@ class Paths:
     REPORT_DIR = BASE_DIR / 'reports'
     
     # Fichiers de données
-    #DATABASE = DATA_DIR / 'dataset.db'
     DATABASE = BASE_DIR / 'dataset.db'
     
     # Modèles
     LSTM_MODEL = MODEL_DIR / 'lstm_model.keras'
     XGB_MODEL = MODEL_DIR / 'xgb_model.json'
-    XGB_REGRESSOR = MODEL_DIR / 'xgb_regressor.json'  # Nouveau
+    XGB_REGRESSOR = MODEL_DIR / 'xgb_regressor.json' 
     SCALER = MODEL_DIR / 'scaler.joblib'
     ENCODER = MODEL_DIR / 'encoder.joblib'
     PREPROCESSOR = MODEL_DIR / 'preprocessor.joblib'
