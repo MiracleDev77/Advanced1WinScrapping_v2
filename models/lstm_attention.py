@@ -1,69 +1,82 @@
-# lstm_attention.py
 import tensorflow as tf
 from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.losses import Loss
 from config.paths import Paths
-from config.params import LSTMParams
+from config.params import LSTMParams, TrainingParams
 from models.temporal_attention import TemporalAttention
+
+class FocalLoss(Loss):
+    def __init__(self, gamma=3.0, alpha=None, from_logits=False, **kwargs):
+        super().__init__(**kwargs)
+        self.gamma = gamma
+        self.alpha = alpha
+        self.from_logits = from_logits
+
+    def call(self, y_true, y_pred):
+        if self.from_logits:
+            y_pred = tf.nn.softmax(y_pred, axis=-1)
+        
+        ce = tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred, from_logits=False)
+        # Calcul de p_t
+        y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=3)
+        p_t = tf.reduce_sum(y_true_one_hot * y_pred, axis=-1)
+        focal_loss = tf.pow(1 - p_t, self.gamma) * ce
+        
+        if self.alpha is not None:
+            # Convertir alpha en tensor
+            alpha_t = tf.convert_to_tensor(self.alpha, dtype=tf.float32)
+            alpha_t = tf.gather(alpha_t, tf.cast(y_true, tf.int32))
+            focal_loss = alpha_t * focal_loss
+            
+        return tf.reduce_mean(focal_loss)
+    
+    def get_config(self):
+        return {'gamma': self.gamma, 'alpha': self.alpha, 'from_logits': self.from_logits}
 
 class LSTMModel:
     def __init__(self, input_shape):
         self.model = self._build_model(input_shape)
 
     def _build_model(self, input_shape):
-        inputs = tf.keras.Input(shape=input_shape)
+        inputs = tf.keras.Input(shape=input_shape, dtype=tf.float32)
         
-        # Shared LSTM layer
+        # Architecture simplifiée
         lstm_out = tf.keras.layers.Bidirectional(
-            LSTM(
-                LSTMParams.UNITS, 
-                return_sequences=True,
-                kernel_regularizer=tf.keras.regularizers.l2(LSTMParams.L2_REG),
-                dropout=LSTMParams.DROPOUT_RATE
-            )
+            LSTM(LSTMParams.UNITS, return_sequences=True, dropout=LSTMParams.DROPOUT_RATE)
         )(inputs)
         
-        # Attention mechanism
         attention = TemporalAttention(LSTMParams.ATTENTION_UNITS)(lstm_out)
         attention = Dropout(LSTMParams.DROPOUT_RATE)(attention)
         
-        # Score classification branch (3 classes)
-        class_branch = Dense(64, activation='relu')(attention)
-        class_branch = Dropout(LSTMParams.DROPOUT_RATE)(class_branch)
+        # Branche classification avec régularisation renforcée
+        class_branch = Dense(64, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(attention)
+        class_branch = Dropout(0.4)(class_branch)
         class_output = Dense(3, activation='softmax', name='score_class')(class_branch)
         
-        # Period prediction branch (binary)
+        # Branche période simplifiée
         period_branch = Dense(32, activation='relu')(attention)
-        period_branch = Dropout(LSTMParams.DROPOUT_RATE)(period_branch)
         period_output = Dense(1, activation='sigmoid', name='period')(period_branch)
         
-        # Score regression branch
-        score_branch = Dense(32, activation='relu')(attention)
-        score_branch = Dropout(LSTMParams.DROPOUT_RATE)(score_branch)
-        score_output = Dense(1, name='score_reg')(score_branch)
+        # Branche régression
+        score_output = Dense(1, name='score_reg')(attention)
 
-        model = tf.keras.Model(
-            inputs=inputs, 
-            outputs=[class_output, period_output, score_output]
-        )
+        model = tf.keras.Model(inputs=inputs, outputs=[class_output, period_output, score_output])
         
-        # Learning rate schedule
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=LSTMParams.LEARNING_RATE,
-            decay_steps=LSTMParams.DECAY_STEPS,
-            decay_rate=LSTMParams.DECAY_RATE
-        )
-        
+        # Compilation avec Focal Loss améliorée
         model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
+            optimizer=tf.keras.optimizers.Adam(LSTMParams.LEARNING_RATE),
             loss={
-                'score_class': 'sparse_categorical_crossentropy',
+                'score_class': FocalLoss(
+                    gamma=TrainingParams.FOCAL_LOSS_GAMMA,
+                    alpha=list(TrainingParams.CLASS_WEIGHTS.values())
+                ),
                 'period': 'binary_crossentropy',
                 'score_reg': 'mse'
             },
             loss_weights={
-                'score_class': 0.4,
-                'period': 0.3,
-                'score_reg': 0.3
+                'score_class': 0.6,  # Poids accru
+                'period': 0.2,
+                'score_reg': 0.2
             },
             metrics={
                 'score_class': 'accuracy',
@@ -73,10 +86,8 @@ class LSTMModel:
         )
         return model
 
-    def train(self, X_train, y_train, X_val, y_val):
-        y_train_class, y_train_period, y_train_score = y_train
-        y_val_class, y_val_period, y_val_score = y_val
-        
+    def train(self, train_dataset, val_dataset):
+        """Entraîne le modèle sans utiliser de poids de classe"""
         callbacks = [
             tf.keras.callbacks.EarlyStopping(
                 patience=LSTMParams.EARLY_STOPPING_PATIENCE,
@@ -84,35 +95,20 @@ class LSTMModel:
                 restore_best_weights=True
             ),
             tf.keras.callbacks.ModelCheckpoint(
-                Paths.LSTM_MODEL,
+                str(Paths.LSTM_MODEL),
                 save_best_only=True,
                 monitor='val_loss'
             ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=5,
-                min_lr=1e-6
+            tf.keras.callbacks.TensorBoard(
+                log_dir=str(Paths.LOGS_DIR),
+                histogram_freq=1
             )
         ]
         
         history = self.model.fit(
-            X_train,
-            {
-                'score_class': y_train_class,
-                'period': y_train_period,
-                'score_reg': y_train_score
-            },
-            validation_data=(
-                X_val, 
-                {
-                    'score_class': y_val_class,
-                    'period': y_val_period,
-                    'score_reg': y_val_score
-                }
-            ),
+            train_dataset,
+            validation_data=val_dataset,
             epochs=LSTMParams.EPOCHS,
-            batch_size=LSTMParams.BATCH_SIZE,
             callbacks=callbacks,
             verbose=1
         )
@@ -120,7 +116,10 @@ class LSTMModel:
 
     def load(self):
         self.model = tf.keras.models.load_model(
-            Paths.LSTM_MODEL,
-            custom_objects={'TemporalAttention': TemporalAttention}
+            str(Paths.LSTM_MODEL),
+            custom_objects={
+                'TemporalAttention': TemporalAttention,
+                'FocalLoss': FocalLoss
+            }
         )
         return self
